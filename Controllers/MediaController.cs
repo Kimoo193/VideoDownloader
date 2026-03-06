@@ -13,12 +13,24 @@ public class MediaController : ControllerBase
 {
     private readonly AppDbContext _db;
 
+    // ─── yt-dlp anti-detection args ──────────────────────────────────────────
+    // بيخلي yt-dlp يبان زي Chrome browser عادي بدل bot
+    private const string AntiBlockArgs =
+        "--user-agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\" " +
+        "--add-header \"Accept-Language:en-US,en;q=0.9\" " +
+        "--add-header \"Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\" " +
+        "--add-header \"Sec-Fetch-Mode:navigate\" " +
+        "--no-check-certificates " +
+        "--extractor-retries 5 " +
+        "--sleep-interval 1 --max-sleep-interval 3 ";
+
     public MediaController(AppDbContext db)
     {
         _db = db;
     }
 
-    // ─── Analyze ────────────────────────────────────────────────
+    // ─── Analyze ─────────────────────────────────────────────────────────────
     [HttpPost("analyze")]
     public async Task<IActionResult> Analyze([FromBody] MediaRequestDto dto)
     {
@@ -27,7 +39,6 @@ public class MediaController : ControllerBase
             await TrackRequest();
             var platform = DetectPlatform(dto.Url);
 
-            // Spotify → مختلف
             if (platform == "spotify")
                 return await AnalyzeSpotify(dto.Url);
 
@@ -35,8 +46,8 @@ public class MediaController : ControllerBase
 
             if (isPlaylist)
             {
-                var result = await RunYtDlp($"--flat-playlist -J \"{dto.Url}\"");
-                var json   = JsonDocument.Parse(result).RootElement;
+                var result  = await RunYtDlp($"--flat-playlist -J \"{dto.Url}\"");
+                var json    = JsonDocument.Parse(result).RootElement;
                 var entries = json.GetProperty("entries").EnumerateArray().ToList();
 
                 return Ok(new
@@ -47,19 +58,14 @@ public class MediaController : ControllerBase
                     itemCount = entries.Count,
                     items     = entries.Select((e, i) => new
                     {
-                        index    = i,
-                        id       = e.TryGetProperty("id", out var id)
-                                   ? id.GetString() : null,
-                        title    = e.TryGetProperty("title", out var t)
-                                   ? t.GetString() : null,
-                        duration = e.TryGetProperty("duration", out var d)
-                                   && d.ValueKind == JsonValueKind.Number
-                                   ? d.GetDouble() : 0,
-                        thumbnail = e.TryGetProperty("thumbnail", out var tn)
-                                   ? tn.GetString() : null,
-                        url      = BuildVideoUrl(platform, 
-                                   e.TryGetProperty("id", out var vid) 
-                                   ? vid.GetString() : "")
+                        index     = i,
+                        id        = e.TryGetProperty("id",        out var id) ? id.GetString()  : null,
+                        title     = e.TryGetProperty("title",     out var t)  ? t.GetString()   : null,
+                        duration  = e.TryGetProperty("duration",  out var d)
+                                    && d.ValueKind == JsonValueKind.Number    ? d.GetDouble()   : 0,
+                        thumbnail = e.TryGetProperty("thumbnail", out var tn) ? tn.GetString()  : null,
+                        url       = BuildVideoUrl(platform,
+                                    e.TryGetProperty("id", out var vid) ? vid.GetString() : "")
                     }),
                     availableQualities = GetQualities(platform)
                 });
@@ -78,35 +84,31 @@ public class MediaController : ControllerBase
                     .OrderByDescending(h => h)
                     .ToList();
 
-                // هل فيه ترجمة؟
-                var hasSubs = json.TryGetProperty("subtitles", out var subs)
-                              && subs.ValueKind == JsonValueKind.Object
-                              && subs.EnumerateObject().Any();
+                var hasSubs     = json.TryGetProperty("subtitles",          out var subs)
+                                  && subs.ValueKind     == JsonValueKind.Object
+                                  && subs.EnumerateObject().Any();
                 var hasAutoSubs = json.TryGetProperty("automatic_captions", out var autoCaps)
                                   && autoCaps.ValueKind == JsonValueKind.Object
                                   && autoCaps.EnumerateObject().Any();
 
                 return Ok(new
                 {
-                    type       = "video",
+                    type      = "video",
                     platform,
-                    title      = json.GetProperty("title").GetString(),
-                    duration   = json.GetProperty("duration").GetDouble(),
-                    thumbnail  = json.GetProperty("thumbnail").GetString(),
-                    uploader   = json.TryGetProperty("uploader", out var up)
-                                 ? up.GetString() : null,
-                    subtitles  = new
+                    title     = json.GetProperty("title").GetString(),
+                    duration  = json.GetProperty("duration").GetDouble(),
+                    thumbnail = json.GetProperty("thumbnail").GetString(),
+                    uploader  = json.TryGetProperty("uploader", out var up) ? up.GetString() : null,
+                    subtitles = new
                     {
-                        available     = hasSubs || hasAutoSubs,
-                        hasManual     = hasSubs,
+                        available        = hasSubs || hasAutoSubs,
+                        hasManual        = hasSubs,
                         hasAutoGenerated = hasAutoSubs,
-                        languages     = hasSubs
-                                        ? subs.EnumerateObject()
-                                              .Select(s => s.Name).Take(10)
-                                        : hasAutoSubs
-                                        ? autoCaps.EnumerateObject()
-                                                  .Select(s => s.Name).Take(10)
-                                        : Enumerable.Empty<string>()
+                        languages        = hasSubs
+                            ? subs.EnumerateObject().Select(s => s.Name).Take(10)
+                            : hasAutoSubs
+                            ? autoCaps.EnumerateObject().Select(s => s.Name).Take(10)
+                            : Enumerable.Empty<string>()
                     },
                     availableQualities = GetQualities(platform, formats)
                 });
@@ -118,7 +120,7 @@ public class MediaController : ControllerBase
         }
     }
 
-    // ─── Download ────────────────────────────────────────────────
+    // ─── Download ────────────────────────────────────────────────────────────
     [HttpPost("download")]
     public async Task<IActionResult> Download([FromBody] MediaDownloadDto dto)
     {
@@ -127,7 +129,6 @@ public class MediaController : ControllerBase
             await TrackRequest();
             var platform = DetectPlatform(dto.Url);
 
-            // Spotify
             if (platform == "spotify")
                 return await DownloadSpotify(dto.Url);
 
@@ -161,7 +162,95 @@ public class MediaController : ControllerBase
         }
     }
 
-    // ─── Subtitles ───────────────────────────────────────────────
+    // ─── Compress ────────────────────────────────────────────────────────────
+    // بيحمل الفيديو على السيرفر → يضغطه بـ FFmpeg → يرجعه base64
+    // استخدمه لما تريد توفير مساحة مع نفس الجودة تقريبًا (CRF 28 = ~40% أصغر)
+    [HttpPost("compress")]
+    public async Task<IActionResult> Compress([FromBody] CompressRequestDto dto)
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(tempDir);
+
+        var inputPath  = Path.Combine(tempDir, "input.mp4");
+        var outputPath = Path.Combine(tempDir, "output.mp4");
+
+        try
+        {
+            await TrackRequest();
+            var platform = DetectPlatform(dto.Url);
+
+            // ── 1. Get CDN links ──────────────────────────────────
+            var format = dto.Quality switch
+            {
+                "1080" => "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+                "720"  => "bestvideo[height<=720]+bestaudio/best[height<=720]",
+                "480"  => "bestvideo[height<=480]+bestaudio/best[height<=480]",
+                "360"  => "bestvideo[height<=360]+bestaudio/best[height<=360]",
+                _      => "bestvideo[height<=720]+bestaudio/best[height<=720]"
+            };
+
+            // ── 2. Download + mux directly via yt-dlp + FFmpeg ───
+            // yt-dlp بيحمل ويعمل mux في نفس الوقت ← أسرع من طريقتين منفصلتين
+            var dlArgs =
+                $"-f \"{format}\" " +
+                $"--merge-output-format mp4 " +
+                $"-o \"{inputPath}\" " +
+                $"--no-playlist " +
+                $"\"{dto.Url}\"";
+
+            await RunYtDlp(dlArgs);
+
+            // ── 3. Compress with FFmpeg ───────────────────────────
+            // CRF 28: جودة كويسة مع ضغط ~40% أقل مساحة
+            // preset fast: سريع على السيرفر
+            // scale: لو الفيديو أكبر من الـ quality المطلوبة، يصغره
+            var targetHeight = dto.Quality switch
+            {
+                "1080" => 1080, "720" => 720, "480" => 480, "360" => 360, _ => 720
+            };
+
+            var ffmpegArgs =
+                $"-i \"{inputPath}\" " +
+                $"-vf \"scale='min(iw,{targetHeight*16/9})':-2\" " +
+                $"-c:v libx264 -crf 28 -preset fast " +
+                $"-c:a aac -b:a 128k " +
+                $"-movflags +faststart " +   // ← مهم: بيخلي الفيديو يشتغل وهو بيتحمل
+                $"-y \"{outputPath}\"";
+
+            await RunProcess("ffmpeg", ffmpegArgs);
+
+            // ── 4. Return result ──────────────────────────────────
+            var originalSize   = new FileInfo(inputPath).Length;
+            var compressedSize = new FileInfo(outputPath).Length;
+            var savedPercent   = (int)((1.0 - (double)compressedSize / originalSize) * 100);
+
+            var bytes    = await System.IO.File.ReadAllBytesAsync(outputPath);
+            var base64   = Convert.ToBase64String(bytes);
+
+            return Ok(new
+            {
+                platform,
+                quality          = dto.Quality,
+                originalSizeKb   = originalSize   / 1024,
+                compressedSizeKb = compressedSize / 1024,
+                savedPercent,
+                base64,
+                fileName = $"video_{dto.Quality}p_compressed.mp4"
+            });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        finally
+        {
+            // تنظيف الملفات المؤقتة دايمًا
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, true);
+        }
+    }
+
+    // ─── Subtitles ───────────────────────────────────────────────────────────
     [HttpPost("subtitles")]
     public async Task<IActionResult> GetSubtitles([FromBody] SubtitleRequestDto dto)
     {
@@ -169,18 +258,15 @@ public class MediaController : ControllerBase
         {
             await TrackRequest();
 
-            var lang     = dto.Language ?? "en";
-            var tempDir  = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            var lang    = dto.Language ?? "en";
+            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
             Directory.CreateDirectory(tempDir);
 
-            // حاول manual subtitles أول
             var args = $"--write-subs --sub-langs \"{lang}\" " +
                        $"--skip-download --no-playlist " +
                        $"-o \"{tempDir}/sub\" \"{dto.Url}\"";
-
             await RunYtDlp(args);
 
-            // لو مش موجود جرب auto-generated
             var subFile = Directory.GetFiles(tempDir).FirstOrDefault();
             if (subFile == null)
             {
@@ -194,18 +280,15 @@ public class MediaController : ControllerBase
             if (subFile == null)
                 return NotFound(new { message = $"No subtitles found for language: {lang}" });
 
-            var content  = await System.IO.File.ReadAllTextAsync(subFile);
-            var ext      = Path.GetExtension(subFile).TrimStart('.');
-
-            // تنظيف الـ temp files
+            var content = await System.IO.File.ReadAllTextAsync(subFile);
+            var ext     = Path.GetExtension(subFile).TrimStart('.');
             Directory.Delete(tempDir, true);
 
             return Ok(new
             {
-                language = lang,
-                format   = ext,
+                language  = lang,
+                format    = ext,
                 content,
-                // تحويل لنص نظيف بدون timestamps
                 plainText = ExtractPlainText(content, ext)
             });
         }
@@ -215,10 +298,9 @@ public class MediaController : ControllerBase
         }
     }
 
-    // ─── Playlist selective ──────────────────────────────────────
+    // ─── Playlist selective ──────────────────────────────────────────────────
     [HttpPost("playlist/download")]
-    public async Task<IActionResult> PlaylistDownload(
-        [FromBody] PlaylistDownloadDto dto)
+    public async Task<IActionResult> PlaylistDownload([FromBody] PlaylistDownloadDto dto)
     {
         try
         {
@@ -271,11 +353,10 @@ public class MediaController : ControllerBase
         }
     }
 
-    // ─── Spotify Helpers ─────────────────────────────────────────
+    // ─── Spotify Helpers ─────────────────────────────────────────────────────
     private async Task<IActionResult> AnalyzeSpotify(string url)
     {
-        // spotdl بيجيب معلومات الأغنية
-        var result = await RunProcess("spotdl", $"--print-errors save \"{url}\"");
+        await RunProcess("spotdl", $"--print-errors save \"{url}\"");
         return Ok(new
         {
             type     = "audio",
@@ -304,75 +385,47 @@ public class MediaController : ControllerBase
         var bytes    = await System.IO.File.ReadAllBytesAsync(file);
         var base64   = Convert.ToBase64String(bytes);
         var fileName = Path.GetFileName(file);
-
         Directory.Delete(tempDir, true);
 
-        return Ok(new
-        {
-            platform = "spotify",
-            fileName,
-            base64,
-            message  = "Download successful"
-        });
+        return Ok(new { platform = "spotify", fileName, base64, message = "Download successful" });
     }
 
-    // ─── Plain Text Extractor ────────────────────────────────────
+    // ─── Helpers ─────────────────────────────────────────────────────────────
     private static string ExtractPlainText(string content, string format)
     {
         var lines = content.Split('\n');
-
         if (format == "vtt")
             return string.Join(" ", lines
-                .Where(l => !l.StartsWith("WEBVTT") &&
-                            !l.Contains("-->") &&
-                            !string.IsNullOrWhiteSpace(l) &&
-                            !l.Trim().All(char.IsDigit))
-                .Select(l => l.Trim())
-                .Distinct());
-
+                .Where(l => !l.StartsWith("WEBVTT") && !l.Contains("-->") &&
+                            !string.IsNullOrWhiteSpace(l) && !l.Trim().All(char.IsDigit))
+                .Select(l => l.Trim()).Distinct());
         if (format == "srt")
             return string.Join(" ", lines
                 .Where(l => !l.Contains("-->") &&
-                            !string.IsNullOrWhiteSpace(l) &&
-                            !l.Trim().All(char.IsDigit))
+                            !string.IsNullOrWhiteSpace(l) && !l.Trim().All(char.IsDigit))
                 .Select(l => l.Trim()));
-
         return content;
     }
 
-    // ─── Platform Detector ───────────────────────────────────────
     private static string DetectPlatform(string url) => url switch
     {
-        var u when u.Contains("youtube.com") || u.Contains("youtu.be")
-            => "youtube",
-        var u when u.Contains("facebook.com") || u.Contains("fb.watch")
-            => "facebook",
-        var u when u.Contains("tiktok.com")
-            => "tiktok",
-        var u when u.Contains("instagram.com")
-            => "instagram",
-        var u when u.Contains("soundcloud.com")
-            => "soundcloud",
-        var u when u.Contains("spotify.com")
-            => "spotify",
+        var u when u.Contains("youtube.com") || u.Contains("youtu.be") => "youtube",
+        var u when u.Contains("facebook.com") || u.Contains("fb.watch") => "facebook",
+        var u when u.Contains("tiktok.com")    => "tiktok",
+        var u when u.Contains("instagram.com") => "instagram",
+        var u when u.Contains("soundcloud.com") => "soundcloud",
+        var u when u.Contains("spotify.com")   => "spotify",
         _ => "unknown"
     };
 
     private static string BuildVideoUrl(string platform, string? id) =>
-        platform switch
-        {
-            "youtube" => $"https://www.youtube.com/watch?v={id}",
-            _ => id ?? ""
-        };
+        platform == "youtube" ? $"https://www.youtube.com/watch?v={id}" : id ?? "";
 
     private static bool IsPlaylist(string url) =>
-        url.Contains("playlist?list=") ||
-        (url.Contains("list=") && !url.Contains("watch?v="));
+        url.Contains("playlist?list=") || (url.Contains("list=") && !url.Contains("watch?v="));
 
-    private static List<object> GetQualities(
-        string platform, List<int>? heights = null)
+    private static List<object> GetQualities(string platform, List<int>? heights = null)
     {
-        // SoundCloud و Spotify → صوت بس
         if (platform is "soundcloud" or "spotify")
             return new List<object>
             {
@@ -392,8 +445,7 @@ public class MediaController : ControllerBase
         };
 
         return all
-            .Where(q => q.type == "audio" ||
-                        heights == null ||
+            .Where(q => q.type == "audio" || heights == null ||
                         heights.Any(h => h >= int.Parse(q.value)))
             .Select(q => (object)new
             {
@@ -406,7 +458,6 @@ public class MediaController : ControllerBase
             .ToList();
     }
 
-    // ─── Request Tracker ─────────────────────────────────────────
     private async Task TrackRequest()
     {
         var claim = User.FindFirst("deviceId")?.Value;
@@ -417,9 +468,10 @@ public class MediaController : ControllerBase
         await _db.SaveChangesAsync();
     }
 
-    // ─── Process Runners ─────────────────────────────────────────
-    private static async Task<string> RunYtDlp(string args) =>
-        await RunProcess("yt-dlp", args);
+    // ─── Process Runners ─────────────────────────────────────────────────────
+    // كل yt-dlp calls بتاخد AntiBlockArgs تلقائيًا
+    private static Task<string> RunYtDlp(string args) =>
+        RunProcess("yt-dlp", AntiBlockArgs + args);
 
     private static async Task<string> RunProcess(string exe, string args)
     {
@@ -445,8 +497,9 @@ public class MediaController : ControllerBase
     }
 }
 
-// ─── DTOs ────────────────────────────────────────────────────────
+// ─── DTOs ─────────────────────────────────────────────────────────────────────
 public record MediaRequestDto(string Url);
 public record MediaDownloadDto(string Url, string Quality);
+public record CompressRequestDto(string Url, string Quality);
 public record PlaylistDownloadDto(List<string> Urls, string Quality);
 public record SubtitleRequestDto(string Url, string? Language);

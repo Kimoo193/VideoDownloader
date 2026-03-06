@@ -15,9 +15,12 @@ RUN apt-get update && apt-get install -y \
     ffmpeg python3 python3-pip curl \
     && rm -rf /var/lib/apt/lists/*
 
+# yt-dlp: دايمًا آخر إصدار عند كل deploy
+# ده بيحل 90% من مشاكل الحظر لأن YouTube بيتغير كتير
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp
 
+# spotdl
 RUN pip3 install spotdl --break-system-packages
 
 COPY --from=build /app/publish .

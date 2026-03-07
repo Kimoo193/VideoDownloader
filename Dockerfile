@@ -4,26 +4,33 @@ EXPOSE 8080
 
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
-COPY . .
-RUN dotnet restore "VideoDownloader.csproj"
-RUN dotnet publish "VideoDownloader.csproj" -c Release -o /app/publish
+
+# نسخ ملف المشروع
+COPY VideoDownloader/VideoDownloader.csproj ./
+RUN dotnet restore
+
+# نسخ باقي الملفات
+COPY VideoDownloader/ ./
+RUN dotnet publish -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
 
+# تثبيت الأدوات المطلوبة
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     python3 \
     python3-pip \
-    python3-dev \
-    gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# تثبيت yt-dlp
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp
+    -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp
 
-RUN pip3 install curl_cffi spotdl --break-system-packages
+# تثبيت spotdl
+RUN pip3 install spotdl --break-system-packages --no-cache-dir
 
 COPY --from=build /app/publish .
+
 ENTRYPOINT ["dotnet", "VideoDownloader.dll"]

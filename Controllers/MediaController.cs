@@ -140,46 +140,19 @@ public class MediaController : ControllerBase
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Playlist download (one video at a time, server muxes each) ──────────
+    // ─── Playlist item download (Flutter calls this once per video) ──────────
+    // Keeping the same endpoint path for backward compatibility.
+    // Flutter's playlist_screen.dart already calls /api/media/download per item,
+    // so this endpoint now simply accepts one URL at a time and streams the file.
     [HttpPost("playlist/download")]
-    public async Task<IActionResult> PlaylistDownload([FromBody] PlaylistDownloadDto dto)
+    public async Task<IActionResult> PlaylistDownload([FromBody] MediaDownloadDto dto)
     {
         try
         {
             await TrackRequest();
-
-            // Download each video sequentially — server muxes and streams each file
-            var results = new List<object>();
-            foreach (var url in dto.Urls)
-            {
-                try
-                {
-                    var platform = DetectPlatform(url);
-                    var result   = await DownloadSingleVideoAsBytes(url, dto.Quality, platform);
-                    results.Add(new
-                    {
-                        url,
-                        success  = true,
-                        fileName = result.fileName,
-                        mimeType = result.mimeType,
-                        data     = Convert.ToBase64String(result.bytes),
-                        error    = (string?)null,
-                    });
-                }
-                catch (Exception ex)
-                {
-                    results.Add(new
-                    {
-                        url,
-                        success  = false,
-                        fileName = (string?)null,
-                        mimeType = (string?)null,
-                        data     = (string?)null,
-                        error    = ex.Message,
-                    });
-                }
-            }
-            return Ok(new { items = results });
+            var platform = DetectPlatform(dto.Url);
+            if (platform == "unknown") return BadRequest(new { message = "Unsupported URL" });
+            return await DownloadSingleVideo(dto.Url, dto.Quality, platform);
         }
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
@@ -321,51 +294,100 @@ public class MediaController : ControllerBase
     // ─── Platform detection ───────────────────────────────────────────────────
     private static string DetectPlatform(string url)
     {
-        var u = url.ToLowerInvariant();
-        return u switch
+        // Extract host safely to avoid substring false-positives
+        // e.g. "t.co" matching "contact.com", "fb.com" matching "cfb.com"
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return "unknown";
+
+        var host = uri.Host.ToLowerInvariant();
+        // Strip leading "www." or "m." for cleaner matching
+        if (host.StartsWith("www.")) host = host[4..];
+        if (host.StartsWith("m."))   host = host[2..];
+
+        return host switch
         {
-            _ when u.Contains("youtube.com")    || u.Contains("youtu.be")      => "youtube",
-            _ when u.Contains("tiktok.com")     || u.Contains("vm.tiktok.com")
-                                                || u.Contains("vt.tiktok.com") => "tiktok",
-            _ when u.Contains("instagram.com")                                 => "instagram",
-            _ when u.Contains("facebook.com")   || u.Contains("fb.watch")
-                                                || u.Contains("fb.com")        => "facebook",
-            _ when u.Contains("twitter.com")    || u.Contains("x.com")
-                                                || u.Contains("t.co")          => "twitter",
-            _ when u.Contains("reddit.com")     || u.Contains("redd.it")       => "reddit",
-            _ when u.Contains("vimeo.com")                                     => "vimeo",
-            _ when u.Contains("dailymotion.com")|| u.Contains("dai.ly")        => "dailymotion",
-            _ when u.Contains("twitch.tv")                                     => "twitch",
-            _ when u.Contains("bilibili.com")   || u.Contains("b23.tv")        => "bilibili",
-            _ when u.Contains("rumble.com")                                    => "rumble",
-            _ when u.Contains("odysee.com")     || u.Contains("lbry.tv")       => "odysee",
-            _ when u.Contains("kick.com")                                      => "kick",
-            _ when u.Contains("pinterest.com")  || u.Contains("pin.it")        => "pinterest",
-            _ when u.Contains("linkedin.com")                                  => "linkedin",
-            _ when u.Contains("snapchat.com")                                  => "snapchat",
-            _ when u.Contains("telegram.me")    || u.Contains("t.me")          => "telegram",
-            _ when u.Contains("streamable.com")                                => "streamable",
-            _ when u.Contains("9gag.com")                                      => "9gag",
-            _ when u.Contains("likee.video")    || u.Contains("l.likee.video") => "likee",
-            _ when u.Contains("triller.co")                                    => "triller",
-            _ when u.Contains("kwai.com")       || u.Contains("kw.ai")         => "kwai",
-            _ when u.Contains("capcut.com")                                    => "capcut",
-            _ when u.Contains("ted.com")                                       => "ted",
-            _ when u.Contains("bbc.co.uk")      || u.Contains("bbc.com")       => "bbc",
-            _ when u.Contains("cnn.com")                                       => "cnn",
-            _ when u.Contains("vk.com")                                        => "vk",
-            _ when u.Contains("ok.ru")                                         => "ok",
-            _ when u.Contains("coub.com")                                      => "coub",
-            _ when u.Contains("spotify.com")                                   => "spotify",
-            _ when u.Contains("soundcloud.com")                                => "soundcloud",
-            _ when u.Contains("bandcamp.com")                                  => "bandcamp",
-            _ when u.Contains("audiomack.com")                                 => "audiomack",
-            _ when u.Contains("mixcloud.com")                                  => "mixcloud",
-            _ when u.Contains("deezer.com")                                    => "deezer",
-            _ when u.Contains("music.apple.com")                               => "applemusic",
-            _ when u.Contains("tidal.com")                                     => "tidal",
-            _ when Uri.TryCreate(url, UriKind.Absolute, out _)                 => "generic",
-            _ => "unknown"
+            // ── Video ────────────────────────────────────────────────────────
+            "youtube.com" or "youtu.be"
+                or "music.youtube.com"                              => "youtube",
+
+            "tiktok.com" or "vm.tiktok.com" or "vt.tiktok.com"    => "tiktok",
+
+            "instagram.com"                                         => "instagram",
+
+            "facebook.com" or "fb.watch" or "fb.com"
+                or "web.facebook.com"                               => "facebook",
+
+            "twitter.com" or "x.com" or "t.co"                     => "twitter",
+
+            "reddit.com" or "redd.it" or "old.reddit.com"          => "reddit",
+
+            "vimeo.com"                                             => "vimeo",
+
+            "dailymotion.com" or "dai.ly"                          => "dailymotion",
+
+            "twitch.tv" or "clips.twitch.tv"                       => "twitch",
+
+            "bilibili.com" or "b23.tv"                             => "bilibili",
+
+            "rumble.com"                                            => "rumble",
+
+            "odysee.com" or "lbry.tv"                              => "odysee",
+
+            "kick.com"                                              => "kick",
+
+            "pinterest.com" or "pin.it" or "pinterest.co.uk"
+                or "pinterest.fr" or "pinterest.de"                 => "pinterest",
+
+            "linkedin.com"                                          => "linkedin",
+
+            "snapchat.com" or "snap.com"                           => "snapchat",
+
+            "telegram.org" or "telegram.me" or "t.me"              => "telegram",
+
+            "streamable.com"                                        => "streamable",
+
+            "9gag.com"                                              => "9gag",
+
+            "likee.video" or "l.likee.video"                       => "likee",
+
+            "triller.co"                                            => "triller",
+
+            "kwai.com" or "kw.ai"                                   => "kwai",
+
+            "capcut.com"                                            => "capcut",
+
+            "ted.com"                                               => "ted",
+
+            "bbc.co.uk" or "bbc.com"                               => "bbc",
+
+            "cnn.com"                                               => "cnn",
+
+            "vk.com" or "vk.ru"                                    => "vk",
+
+            "ok.ru"                                                 => "ok",
+
+            "coub.com"                                              => "coub",
+
+            // ── Audio ────────────────────────────────────────────────────────
+            "open.spotify.com" or "spotify.com"                    => "spotify",
+
+            "soundcloud.com" or "on.soundcloud.com"                => "soundcloud",
+
+            _ when host.EndsWith(".bandcamp.com") || host == "bandcamp.com"
+                                                                    => "bandcamp",
+
+            "audiomack.com"                                         => "audiomack",
+
+            "mixcloud.com"                                          => "mixcloud",
+
+            "deezer.com" or "deezer.page.link"                     => "deezer",
+
+            "music.apple.com"                                       => "applemusic",
+
+            "tidal.com" or "listen.tidal.com"                      => "tidal",
+
+            // ── Fallback: let yt-dlp try ─────────────────────────────────────
+            _ => "generic"
         };
     }
 
@@ -374,7 +396,7 @@ public class MediaController : ControllerBase
     {
         "tiktok"    => "--extractor-args \"tiktok:app_name=trill;app_version=26.1.3\" --no-check-certificates",
         "facebook"  => "--add-header \"Sec-Fetch-Site:same-origin\" --add-header \"Referer:https://www.facebook.com/\"",
-        "instagram" => "--add-header \"Referer:https://www.instagram.com/\" --cookies-from-browser chrome",
+        "instagram" => "--add-header \"Referer:https://www.instagram.com/\"",
         "twitter"   => "--add-header \"Referer:https://x.com/\"",
         "reddit"    => "--add-header \"Referer:https://www.reddit.com/\"",
         "bilibili"  => "--add-header \"Referer:https://www.bilibili.com/\"",
@@ -391,11 +413,15 @@ public class MediaController : ControllerBase
         var u = url.ToLowerInvariant();
         return platform switch
         {
-            "youtube"   => u.Contains("playlist?list=") || (u.Contains("list=") && !u.Contains("watch?v=")),
-            "tiktok"    => u.Contains("/@") && (u.Contains("/video") == false) && !u.Contains("vm.tiktok"),
-            "instagram" => u.Contains("/reel/") == false && (u.Contains("/p/") == false)
-                           && (u.Contains("/stories/") || u.Contains("/highlights/") || u.Contains("?igsh=")),
-            _           => false,
+            // YouTube: explicit playlist URL, not a single video with list param
+            "youtube" => u.Contains("playlist?list=") ||
+                         (u.Contains("list=") && !u.Contains("/watch") && !u.Contains("youtu.be")),
+
+            // TikTok: user profile page (/@username) without a specific video path
+            "tiktok"  => u.Contains("/@") && !u.Contains("/video/"),
+
+            // Other platforms: treat as single video (Instagram has no public playlist API)
+            _         => false,
         };
     }
 
@@ -474,8 +500,10 @@ public class MediaController : ControllerBase
 
     private static Task<string> RunYtDlp(string args) => RunProcess("yt-dlp", args);
 
-    private static async Task<string> RunProcess(string exe, string args)
+    private static async Task<string> RunProcess(string exe, string args,
+        int timeoutSeconds = 300)
     {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         var psi = new ProcessStartInfo
         {
             FileName               = exe,
@@ -487,11 +515,23 @@ public class MediaController : ControllerBase
         };
 
         using var process = Process.Start(psi)!;
-        var output = await process.StandardOutput.ReadToEndAsync();
-        var error  = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask  = process.StandardError.ReadToEndAsync();
 
-        if (process.ExitCode != 0) throw new Exception(error);
+        try
+        {
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new Exception($"{exe} timed out after {timeoutSeconds}s");
+        }
+
+        var output = await outputTask;
+        var error  = await errorTask;
+
+        if (process.ExitCode != 0) throw new Exception(error.Length > 0 ? error : $"{exe} exited with code {process.ExitCode}");
         return output;
     }
 }
@@ -499,5 +539,4 @@ public class MediaController : ControllerBase
 // ─── DTOs ─────────────────────────────────────────────────────────────────────
 public record MediaRequestDto(string Url);
 public record MediaDownloadDto(string Url, string Quality);
-public record PlaylistDownloadDto(List<string> Urls, string Quality);
 public record SubtitleRequestDto(string Url, string? Language);

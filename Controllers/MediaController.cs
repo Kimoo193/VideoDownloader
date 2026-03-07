@@ -132,7 +132,11 @@ public class MediaController : ControllerBase
                 });
             }
         }
-        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ANALYZE ERROR] {ex.Message}");
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     // ─── Download ─────────────────────────────────────────────────────────────
@@ -148,7 +152,11 @@ public class MediaController : ControllerBase
             if (platform is "unknown" or "generic") return BadRequest(new { message = "Unsupported URL" });
             return await DownloadSingleVideo(url, dto.Quality, platform);
         }
-        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] {ex.Message}");
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     [HttpPost("playlist/download")]
@@ -162,7 +170,11 @@ public class MediaController : ControllerBase
             if (platform is "unknown" or "generic") return BadRequest(new { message = "Unsupported URL" });
             return await DownloadSingleVideo(url, dto.Quality, platform);
         }
-        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] {ex.Message}");
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     // ─── Subtitles ────────────────────────────────────────────────────────────
@@ -197,7 +209,11 @@ public class MediaController : ControllerBase
             return Ok(new { language = lang, format = subExt, content,
                             plainText = ExtractPlainText(content, subExt) });
         }
-        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ERROR] {ex.Message}");
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     // ─── Core download ────────────────────────────────────────────────────────

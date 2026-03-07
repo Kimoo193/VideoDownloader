@@ -435,6 +435,8 @@ public class MediaController : ControllerBase
         "vk"        => "--add-header \"Referer:https://vk.com/\"",
         "pinterest" => "--add-header \"Referer:https://www.pinterest.com/\"",
         "twitch"    => "--no-check-certificates",
+        "soundcloud" => "--add-header \"Referer:https://soundcloud.com/\" " +
+                        "--add-header \"Origin:https://soundcloud.com\"",
         "generic"   => "--no-check-certificates",
         _           => ""
     };

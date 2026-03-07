@@ -425,7 +425,8 @@ public class MediaController : ControllerBase
     private static string GetPlatformArgs(string platform) => platform switch
     {
         "tiktok"    => "--impersonate chrome --no-check-certificates",
-        "instagram" => "--impersonate chrome --add-header \"Referer:https://www.instagram.com/\"",
+        "instagram" => "--impersonate chrome-131 --add-header \"Referer:https://www.instagram.com/\" " +
+                       "--extractor-retries 5 --sleep-interval 3 --sleep-requests 1", 
         "facebook"  => "--no-check-certificates " +
                        "--add-header \"Sec-Fetch-Site:same-origin\" " +
                        "--add-header \"Referer:https://www.facebook.com/\"",

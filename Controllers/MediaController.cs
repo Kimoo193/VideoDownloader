@@ -404,12 +404,12 @@ public class MediaController : ControllerBase
     }
 
     // ─── Per-platform yt-dlp args ─────────────────────────────────────────────
-    // KEY FIX: TikTok requires --impersonate chrome-131 (needs curl_cffi installed)
+    // KEY FIX: TikTok/Instagram require --impersonate chrome (needs curl_cffi >= 0.7.0)
     //          Facebook share/r/ URLs need --no-check-certificates + referer
     private static string GetPlatformArgs(string platform) => platform switch
     {
-        "tiktok"    => "--impersonate chrome-131 --no-check-certificates",
-        "instagram" => "--impersonate chrome-131 --add-header \"Referer:https://www.instagram.com/\"",
+        "tiktok"    => "--impersonate chrome --no-check-certificates",
+        "instagram" => "--impersonate chrome --add-header \"Referer:https://www.instagram.com/\"",
         "facebook"  => "--no-check-certificates " +
                        "--add-header \"Sec-Fetch-Site:same-origin\" " +
                        "--add-header \"Referer:https://www.facebook.com/\"",

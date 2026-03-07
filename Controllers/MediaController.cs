@@ -29,20 +29,21 @@ public class MediaController : ControllerBase
         try
         {
             await TrackRequest();
-            var platform = DetectPlatform(dto.Url);
+            var url = ExtractUrl(dto.Url);
+            var platform = DetectPlatform(url);
 
-            if (platform == "spotify")  return await AnalyzeSpotify(dto.Url);
+            if (platform == "spotify")  return await AnalyzeSpotify(url);
             if (platform == "unknown")  return BadRequest(new { message = "Unsupported URL" });
 
             if (platform is "soundcloud" or "bandcamp" or "audiomack" or "mixcloud" or "deezer")
-                return await AnalyzeAudioPlatform(dto.Url, platform);
+                return await AnalyzeAudioPlatform(url, platform);
 
-            var isPlaylist = IsPlaylist(dto.Url, platform);
+            var isPlaylist = IsPlaylist(url, platform);
 
             if (isPlaylist)
             {
                 var result  = await RunYtDlp(
-                    $"--flat-playlist -J {AntiBlockArgs} {GetPlatformArgs(platform)} \"{dto.Url}\"");
+                    $"--flat-playlist -J {AntiBlockArgs} {GetPlatformArgs(platform)} \"{url}\"");
                 var json    = JsonDocument.Parse(result).RootElement;
                 var entries = json.GetProperty("entries").EnumerateArray().ToList();
 
@@ -69,7 +70,7 @@ public class MediaController : ControllerBase
             else
             {
                 var result = await RunYtDlp(
-                    $"-J --no-playlist {AntiBlockArgs} {GetPlatformArgs(platform)} \"{dto.Url}\"");
+                    $"-J --no-playlist {AntiBlockArgs} {GetPlatformArgs(platform)} \"{url}\"");
                 var json   = JsonDocument.Parse(result).RootElement;
 
                 var formats = json.TryGetProperty("formats", out var fmtArr)
@@ -129,10 +130,10 @@ public class MediaController : ControllerBase
         try
         {
             await TrackRequest();
-            var platform = DetectPlatform(dto.Url);
-            if (platform == "spotify") return await DownloadSpotify(dto.Url);
+            var platform = DetectPlatform(url);
+            if (platform == "spotify") return await DownloadSpotify(url);
             if (platform == "unknown") return BadRequest(new { message = "Unsupported URL" });
-            return await DownloadSingleVideo(dto.Url, dto.Quality, platform);
+            return await DownloadSingleVideo(url, dto.Quality, platform);
         }
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
@@ -320,57 +321,106 @@ public class MediaController : ControllerBase
     }
 
     // ─── Platform detection ───────────────────────────────────────────────────
+    // ─── Extract first valid URL from text ────────────────────────────────────
+    // Handles WhatsApp/Telegram share messages like:
+    //   "Listen to X on SoundCloud\nhttps://on.soundcloud.com/abc"
+    public static string ExtractUrl(string input)
+    {
+        input = input.Trim();
+        if (Uri.TryCreate(input, UriKind.Absolute, out var direct) &&
+            (direct.Scheme == "https" || direct.Scheme == "http"))
+            return input;
+
+        var match = System.Text.RegularExpressions.Regex.Match(
+            input, @"https?://[^\s""\)\]>]+");
+        return match.Success ? match.Value : input;
+    }
+
     private static string DetectPlatform(string url)
     {
+        // Extract URL from text first (handles share messages)
+        url = ExtractUrl(url);
+
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return "unknown";
 
         var host = uri.Host.ToLowerInvariant();
-        if (host.StartsWith("www.")) host = host[4..];
-        if (host.StartsWith("m."))   host = host[2..];
 
-        return host switch
-        {
-            "youtube.com" or "youtu.be" or "music.youtube.com"                 => "youtube",
-            "tiktok.com" or "vm.tiktok.com" or "vt.tiktok.com"                => "tiktok",
-            "instagram.com"                                                     => "instagram",
-            "facebook.com" or "fb.watch" or "fb.com" or "web.facebook.com"    => "facebook",
-            "twitter.com" or "x.com" or "t.co"                                 => "twitter",
-            "reddit.com" or "redd.it" or "old.reddit.com"                      => "reddit",
-            "vimeo.com"                                                         => "vimeo",
-            "dailymotion.com" or "dai.ly"                                      => "dailymotion",
-            "twitch.tv" or "clips.twitch.tv"                                   => "twitch",
-            "bilibili.com" or "b23.tv"                                         => "bilibili",
-            "rumble.com"                                                        => "rumble",
-            "odysee.com" or "lbry.tv"                                          => "odysee",
-            "kick.com"                                                          => "kick",
-            "pinterest.com" or "pin.it" or "pinterest.co.uk"
-                or "pinterest.fr" or "pinterest.de"                            => "pinterest",
-            "linkedin.com"                                                      => "linkedin",
-            "snapchat.com" or "snap.com"                                       => "snapchat",
-            "telegram.org" or "telegram.me" or "t.me"                         => "telegram",
-            "streamable.com"                                                    => "streamable",
-            "9gag.com"                                                          => "9gag",
-            "likee.video" or "l.likee.video"                                   => "likee",
-            "triller.co"                                                        => "triller",
-            "kwai.com" or "kw.ai"                                               => "kwai",
-            "capcut.com"                                                        => "capcut",
-            "ted.com"                                                           => "ted",
-            "bbc.co.uk" or "bbc.com"                                           => "bbc",
-            "cnn.com"                                                           => "cnn",
-            "vk.com" or "vk.ru"                                                => "vk",
-            "ok.ru"                                                             => "ok",
-            "coub.com"                                                          => "coub",
-            "open.spotify.com" or "spotify.com"                                => "spotify",
-            "soundcloud.com" or "on.soundcloud.com"                            => "soundcloud",
-            _ when host.EndsWith(".bandcamp.com") || host == "bandcamp.com"    => "bandcamp",
-            "audiomack.com"                                                     => "audiomack",
-            "mixcloud.com"                                                      => "mixcloud",
-            "deezer.com" or "deezer.page.link"                                 => "deezer",
-            "music.apple.com"                                                   => "applemusic",
-            "tidal.com" or "listen.tidal.com"                                  => "tidal",
-            _                                                                   => "generic"
-        };
+        // Strip common mobile/web prefixes
+        foreach (var p in new[] { "www.", "m.", "mobile.", "web." })
+            if (host.StartsWith(p)) { host = host[p.Length..]; break; }
+
+        // Use EndsWith so any subdomain works:
+        // on.soundcloud.com  -> soundcloud.com
+        // music.youtube.com  -> youtube.com
+        // clips.twitch.tv    -> twitch.tv
+
+        if (host == "youtu.be" || host == "youtube.com" || host.EndsWith(".youtube.com"))
+            return "youtube";
+        if (host == "tiktok.com" || host.EndsWith(".tiktok.com"))
+            return "tiktok";
+        if (host == "instagram.com" || host.EndsWith(".instagram.com"))
+            return "instagram";
+        if (host == "facebook.com" || host.EndsWith(".facebook.com") || host == "fb.watch" || host == "fb.com")
+            return "facebook";
+        if (host == "twitter.com" || host == "x.com" || host.EndsWith(".twitter.com") || host == "t.co")
+            return "twitter";
+        if (host == "reddit.com" || host == "redd.it" || host.EndsWith(".reddit.com"))
+            return "reddit";
+        if (host == "vimeo.com" || host.EndsWith(".vimeo.com"))
+            return "vimeo";
+        if (host == "dailymotion.com" || host == "dai.ly" || host.EndsWith(".dailymotion.com"))
+            return "dailymotion";
+        if (host == "twitch.tv" || host.EndsWith(".twitch.tv"))
+            return "twitch";
+        if (host == "bilibili.com" || host == "b23.tv" || host.EndsWith(".bilibili.com"))
+            return "bilibili";
+        if (host == "rumble.com" || host.EndsWith(".rumble.com"))
+            return "rumble";
+        if (host == "odysee.com" || host == "lbry.tv")
+            return "odysee";
+        if (host == "kick.com" || host.EndsWith(".kick.com"))
+            return "kick";
+        if (host == "pinterest.com" || host == "pin.it" || host.EndsWith(".pinterest.com") || host.StartsWith("pinterest."))
+            return "pinterest";
+        if (host == "linkedin.com" || host.EndsWith(".linkedin.com"))
+            return "linkedin";
+        if (host == "snapchat.com" || host == "snap.com" || host.EndsWith(".snapchat.com"))
+            return "snapchat";
+        if (host == "t.me" || host == "telegram.me" || host == "telegram.org")
+            return "telegram";
+        if (host == "streamable.com")  return "streamable";
+        if (host == "9gag.com")        return "9gag";
+        if (host == "likee.video" || host.EndsWith(".likee.video")) return "likee";
+        if (host == "triller.co")      return "triller";
+        if (host == "kwai.com" || host == "kw.ai") return "kwai";
+        if (host == "capcut.com" || host.EndsWith(".capcut.com")) return "capcut";
+        if (host == "ted.com" || host.EndsWith(".ted.com")) return "ted";
+        if (host == "bbc.com" || host == "bbc.co.uk" || host.EndsWith(".bbc.com") || host.EndsWith(".bbc.co.uk")) return "bbc";
+        if (host == "cnn.com" || host.EndsWith(".cnn.com")) return "cnn";
+        if (host == "vk.com" || host == "vk.ru") return "vk";
+        if (host == "ok.ru") return "ok";
+        if (host == "coub.com") return "coub";
+
+        // ── Audio ──────────────────────────────────────────────────────────
+        if (host == "spotify.com" || host.EndsWith(".spotify.com"))
+            return "spotify";
+        if (host == "soundcloud.com" || host.EndsWith(".soundcloud.com"))
+            return "soundcloud";
+        if (host == "bandcamp.com" || host.EndsWith(".bandcamp.com"))
+            return "bandcamp";
+        if (host == "audiomack.com" || host.EndsWith(".audiomack.com"))
+            return "audiomack";
+        if (host == "mixcloud.com" || host.EndsWith(".mixcloud.com"))
+            return "mixcloud";
+        if (host == "deezer.com" || host.EndsWith(".deezer.com"))
+            return "deezer";
+        if (host == "music.apple.com" || (host.EndsWith(".apple.com") && uri.AbsolutePath.StartsWith("/music")))
+            return "applemusic";
+        if (host == "tidal.com" || host.EndsWith(".tidal.com"))
+            return "tidal";
+
+        return "generic";
     }
 
     // ─── Per-platform yt-dlp args ─────────────────────────────────────────────

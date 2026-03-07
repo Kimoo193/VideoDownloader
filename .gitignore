@@ -4,3 +4,4 @@ obj/
 *.db-shm
 *.db-wal
 .env
+tmp/tmp/

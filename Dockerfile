@@ -5,14 +5,12 @@ EXPOSE 8080
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 
-# نسخ ملف المشروع (الموجود في نفس مستوى Dockerfile)
-COPY *.sln .
-COPY VideoDownloader/*.csproj ./VideoDownloader/
-RUN dotnet restore "VideoDownloader/VideoDownloader.csproj"
+# نسخ ملف المشروع (موجود في نفس المستوى)
+COPY *.csproj .
+RUN dotnet restore
 
 # نسخ باقي الملفات
-COPY VideoDownloader/. ./VideoDownloader/
-WORKDIR /src/VideoDownloader
+COPY . .
 RUN dotnet publish -c Release -o /app/publish
 
 FROM base AS final

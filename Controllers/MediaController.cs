@@ -425,9 +425,13 @@ public class MediaController : ControllerBase
     private static string GetPlatformArgs(string platform) => platform switch
     {
         "tiktok"    => "--impersonate chrome --no-check-certificates",
-        "instagram" => "--impersonate chrome-131 --add-header \"Referer:https://www.instagram.com/\" " +
-                       "--extractor-retries 3 --sleep-interval 2 " +
-                       "--user-agent \"Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1\"",
+        "instagram" => System.IO.File.Exists("/tmp/instagram_cookies.txt")
+            ? "--cookies /tmp/instagram_cookies.txt " +
+              "--add-header \"Referer:https://www.instagram.com/\" " +
+              "--extractor-retries 3 --sleep-interval 2"
+            : "--impersonate chrome-131 " +
+              "--add-header \"Referer:https://www.instagram.com/\" " +
+              "--extractor-retries 3 --sleep-interval 2",
         "facebook"  => "--no-check-certificates " +
                        "--add-header \"Sec-Fetch-Site:same-origin\" " +
                        "--add-header \"Referer:https://www.facebook.com/\"",

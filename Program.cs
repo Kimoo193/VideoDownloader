@@ -33,6 +33,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
+var instaCookies = Environment.GetEnvironmentVariable("INSTAGRAM_COOKIES");
+if (!string.IsNullOrEmpty(instaCookies))
+    await File.WriteAllTextAsync("/tmp/instagram_cookies.txt", instaCookies);
 
 // Create DB if not exists
 using (var scope = app.Services.CreateScope())

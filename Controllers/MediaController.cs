@@ -34,7 +34,6 @@ public class MediaController : ControllerBase
             if (platform == "spotify")  return await AnalyzeSpotify(dto.Url);
             if (platform == "unknown")  return BadRequest(new { message = "Unsupported URL" });
 
-            // Audio-only platforms
             if (platform is "soundcloud" or "bandcamp" or "audiomack" or "mixcloud" or "deezer")
                 return await AnalyzeAudioPlatform(dto.Url, platform);
 
@@ -131,16 +130,13 @@ public class MediaController : ControllerBase
         {
             await TrackRequest();
             var platform = DetectPlatform(dto.Url);
-
             if (platform == "spotify") return await DownloadSpotify(dto.Url);
             if (platform == "unknown") return BadRequest(new { message = "Unsupported URL" });
-
             return await DownloadSingleVideo(dto.Url, dto.Quality, platform);
         }
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Playlist item download ───────────────────────────────────────────────
     [HttpPost("playlist/download")]
     public async Task<IActionResult> PlaylistDownload([FromBody] MediaDownloadDto dto)
     {
@@ -188,7 +184,7 @@ public class MediaController : ControllerBase
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Core download logic ──────────────────────────────────────────────────
+    // ─── Core download ────────────────────────────────────────────────────────
     private async Task<IActionResult> DownloadSingleVideo(string url, string quality, string platform)
     {
         var result = await DownloadSingleVideoAsBytes(url, quality, platform);
@@ -200,12 +196,7 @@ public class MediaController : ControllerBase
     {
         var isAudio = quality is "mp3" or "m4a";
 
-        // ── Platform-aware format selection ───────────────────────────────────
-        // TikTok, Instagram, Facebook, Twitter, Reddit — these platforms serve
-        // pre-muxed files (video+audio already combined).  Using bestvideo+bestaudio
-        // with --merge-output-format causes ffmpeg to fail because there is often
-        // only ONE combined stream, not separate video/audio tracks.
-        // For these we simply grab the best pre-muxed mp4 instead.
+        // Platforms that serve pre-muxed streams (no separate video+audio tracks)
         var isMuxedPlatform = platform is "tiktok" or "instagram" or "facebook"
                                        or "twitter" or "reddit" or "pinterest"
                                        or "snapchat" or "9gag" or "likee"
@@ -218,7 +209,6 @@ public class MediaController : ControllerBase
         }
         else if (isMuxedPlatform)
         {
-            // These platforms serve single combined streams — pick best available mp4
             format = quality switch
             {
                 "2160" => "best[height<=2160][ext=mp4]/best[height<=2160]/best",
@@ -231,7 +221,6 @@ public class MediaController : ControllerBase
         }
         else
         {
-            // YouTube, Vimeo, Dailymotion etc — separate video+audio tracks, need merge
             format = quality switch
             {
                 "2160" => "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
@@ -255,7 +244,6 @@ public class MediaController : ControllerBase
         }
         else if (isMuxedPlatform)
         {
-            // No --merge-output-format for pre-muxed platforms — just download as-is
             ytArgs = $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
                      $"-o \"{outTemplate}\" --no-playlist \"{url}\"";
         }
@@ -386,11 +374,15 @@ public class MediaController : ControllerBase
     }
 
     // ─── Per-platform yt-dlp args ─────────────────────────────────────────────
+    // KEY FIX: TikTok requires --impersonate chrome-131 (needs curl_cffi installed)
+    //          Facebook share/r/ URLs need --no-check-certificates + referer
     private static string GetPlatformArgs(string platform) => platform switch
     {
-        "tiktok"    => "--extractor-args \"tiktok:app_name=trill;app_version=26.1.3\" --no-check-certificates",
-        "facebook"  => "--add-header \"Sec-Fetch-Site:same-origin\" --add-header \"Referer:https://www.facebook.com/\"",
-        "instagram" => "--add-header \"Referer:https://www.instagram.com/\"",
+        "tiktok"    => "--impersonate chrome-131 --no-check-certificates",
+        "instagram" => "--impersonate chrome-131 --add-header \"Referer:https://www.instagram.com/\"",
+        "facebook"  => "--no-check-certificates " +
+                       "--add-header \"Sec-Fetch-Site:same-origin\" " +
+                       "--add-header \"Referer:https://www.facebook.com/\"",
         "twitter"   => "--add-header \"Referer:https://x.com/\"",
         "reddit"    => "--add-header \"Referer:https://www.reddit.com/\"",
         "bilibili"  => "--add-header \"Referer:https://www.bilibili.com/\"",
@@ -507,10 +499,7 @@ public class MediaController : ControllerBase
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask  = process.StandardError.ReadToEndAsync();
 
-        try
-        {
-            await process.WaitForExitAsync(cts.Token);
-        }
+        try { await process.WaitForExitAsync(cts.Token); }
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
@@ -520,12 +509,12 @@ public class MediaController : ControllerBase
         var output = await outputTask;
         var error  = await errorTask;
 
-        if (process.ExitCode != 0) throw new Exception(error.Length > 0 ? error : $"{exe} exited with code {process.ExitCode}");
+        if (process.ExitCode != 0)
+            throw new Exception(error.Length > 0 ? error : $"{exe} exited with code {process.ExitCode}");
         return output;
     }
 }
 
-// ─── DTOs ─────────────────────────────────────────────────────────────────────
 public record MediaRequestDto(string Url);
 public record MediaDownloadDto(string Url, string Quality);
 public record SubtitleRequestDto(string Url, string? Language);

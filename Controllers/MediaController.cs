@@ -13,19 +13,16 @@ public class MediaController : ControllerBase
 {
     private readonly AppDbContext _db;
 
-    // Anti-block headers injected into every yt-dlp call
     private const string AntiBlockArgs =
-        "--user-agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\" " +
+        "--user-agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" " +
         "--add-header \"Accept-Language:en-US,en;q=0.9\" " +
         "--add-header \"Sec-Fetch-Mode:navigate\" " +
         "--retries 3 --sleep-interval 1";
 
-    public MediaController(AppDbContext db)
-    {
-        _db = db;
-    }
+    public MediaController(AppDbContext db) { _db = db; }
 
-    // ─── Analyze ─────────────────────────────────────────────────
+    // ─── Analyze ──────────────────────────────────────────────────────────────
     [HttpPost("analyze")]
     public async Task<IActionResult> Analyze([FromBody] MediaRequestDto dto)
     {
@@ -34,14 +31,19 @@ public class MediaController : ControllerBase
             await TrackRequest();
             var platform = DetectPlatform(dto.Url);
 
-            if (platform == "spotify")
-                return await AnalyzeSpotify(dto.Url);
+            if (platform == "spotify")  return await AnalyzeSpotify(dto.Url);
+            if (platform == "unknown")  return BadRequest(new { message = "Unsupported URL" });
 
-            var isPlaylist = IsPlaylist(dto.Url);
+            // Audio-only platforms
+            if (platform is "soundcloud" or "bandcamp" or "audiomack" or "mixcloud" or "deezer")
+                return await AnalyzeAudioPlatform(dto.Url, platform);
+
+            var isPlaylist = IsPlaylist(dto.Url, platform);
 
             if (isPlaylist)
             {
-                var result  = await RunYtDlp($"--flat-playlist -J \"{dto.Url}\"");
+                var result  = await RunYtDlp(
+                    $"--flat-playlist -J {AntiBlockArgs} {GetPlatformArgs(platform)} \"{dto.Url}\"");
                 var json    = JsonDocument.Parse(result).RootElement;
                 var entries = json.GetProperty("entries").EnumerateArray().ToList();
 
@@ -49,51 +51,62 @@ public class MediaController : ControllerBase
                 {
                     type      = "playlist",
                     platform,
-                    title     = json.GetProperty("title").GetString(),
+                    title     = json.TryGetProperty("title", out var pt) ? pt.GetString() : "Playlist",
                     itemCount = entries.Count,
                     items     = entries.Select((e, i) => new
                     {
-                        index    = i,
-                        id       = e.TryGetProperty("id", out var id)    ? id.GetString()    : null,
-                        title    = e.TryGetProperty("title", out var t)  ? t.GetString()     : null,
-                        duration = e.TryGetProperty("duration", out var d)
-                                   && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0,
-                        thumbnail = e.TryGetProperty("thumbnail", out var tn) ? tn.GetString() : null,
-                        url      = BuildVideoUrl(platform,
-                                   e.TryGetProperty("id", out var vid) ? vid.GetString() : "")
+                        index     = i,
+                        id        = e.TryGetProperty("id",        out var id) ? id.GetString()   : null,
+                        title     = e.TryGetProperty("title",     out var t)  ? t.GetString()    : null,
+                        duration  = e.TryGetProperty("duration",  out var d)
+                                    && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0,
+                        thumbnail = e.TryGetProperty("thumbnail", out var tn) ? tn.GetString()   : null,
+                        url       = BuildVideoUrl(platform,
+                                    e.TryGetProperty("id", out var vid) ? vid.GetString() : ""),
+                        webpage_url = e.TryGetProperty("webpage_url", out var wu) ? wu.GetString() : null,
                     }),
                     availableQualities = GetQualities(platform)
                 });
             }
             else
             {
-                var result = await RunYtDlp($"-J --no-playlist {AntiBlockArgs} \"{dto.Url}\"");
+                var result = await RunYtDlp(
+                    $"-J --no-playlist {AntiBlockArgs} {GetPlatformArgs(platform)} \"{dto.Url}\"");
                 var json   = JsonDocument.Parse(result).RootElement;
 
-                var formats = json.GetProperty("formats")
-                    .EnumerateArray()
-                    .Where(f => f.TryGetProperty("height", out var h)
-                                && h.ValueKind == JsonValueKind.Number)
-                    .Select(f => f.GetProperty("height").GetInt32())
-                    .Distinct()
-                    .OrderByDescending(h => h)
-                    .ToList();
+                var formats = json.TryGetProperty("formats", out var fmtArr)
+                    ? fmtArr.EnumerateArray()
+                        .Where(f => f.TryGetProperty("height", out var h)
+                                    && h.ValueKind == JsonValueKind.Number)
+                        .Select(f => f.GetProperty("height").GetInt32())
+                        .Distinct()
+                        .OrderByDescending(h => h)
+                        .ToList()
+                    : new List<int>();
 
-                var hasSubs    = json.TryGetProperty("subtitles", out var subs)
-                                 && subs.ValueKind == JsonValueKind.Object
-                                 && subs.EnumerateObject().Any();
+                var hasSubs     = json.TryGetProperty("subtitles",          out var subs)
+                                  && subs.ValueKind == JsonValueKind.Object
+                                  && subs.EnumerateObject().Any();
                 var hasAutoSubs = json.TryGetProperty("automatic_captions", out var autoCaps)
                                   && autoCaps.ValueKind == JsonValueKind.Object
                                   && autoCaps.EnumerateObject().Any();
+
+                // Safe property getters
+                var title     = json.TryGetProperty("title",     out var jt) ? jt.GetString()  : "Unknown";
+                var duration  = json.TryGetProperty("duration",  out var jd)
+                                && jd.ValueKind == JsonValueKind.Number ? jd.GetDouble() : 0;
+                var thumbnail = json.TryGetProperty("thumbnail", out var jtn) ? jtn.GetString() : null;
+                var uploader  = json.TryGetProperty("uploader",  out var ju)  ? ju.GetString()  :
+                                json.TryGetProperty("channel",   out var jc)  ? jc.GetString()  : null;
 
                 return Ok(new
                 {
                     type      = "video",
                     platform,
-                    title     = json.GetProperty("title").GetString(),
-                    duration  = json.GetProperty("duration").GetDouble(),
-                    thumbnail = json.GetProperty("thumbnail").GetString(),
-                    uploader  = json.TryGetProperty("uploader", out var up) ? up.GetString() : null,
+                    title,
+                    duration,
+                    thumbnail,
+                    uploader,
                     subtitles = new
                     {
                         available        = hasSubs || hasAutoSubs,
@@ -109,17 +122,10 @@ public class MediaController : ControllerBase
                 });
             }
         }
-        catch (Exception ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
     // ─── Download ─────────────────────────────────────────────────────────────
-    // Strategy:
-    //   1. Ask yt-dlp to download + mux into a temp file on the Railway server.
-    //   2. Stream the finished file back to the Flutter client as application/octet-stream.
-    //   3. Flutter saves it directly — no FFmpeg needed on the device.
     [HttpPost("download")]
     public async Task<IActionResult> Download([FromBody] MediaDownloadDto dto)
     {
@@ -128,12 +134,11 @@ public class MediaController : ControllerBase
             await TrackRequest();
             var platform = DetectPlatform(dto.Url);
 
-            if (platform == "spotify")
-                return await DownloadSpotify(dto.Url);
+            if (platform == "spotify") return await DownloadSpotify(dto.Url);
+            if (platform == "unknown") return BadRequest(new { message = "Unsupported URL" });
 
             var isAudio = dto.Quality is "mp3" or "m4a";
 
-            // ── Build format selector ──────────────────────────────────────
             var format = dto.Quality switch
             {
                 "2160" => "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
@@ -146,101 +151,77 @@ public class MediaController : ControllerBase
                 _      => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
             };
 
-            var ext     = isAudio ? (dto.Quality == "mp3" ? "mp3" : "m4a") : "mp4";
-            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            var tempDir     = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
             Directory.CreateDirectory(tempDir);
-            var outTemplate = Path.Combine(tempDir, $"output.%(ext)s");
+            var outTemplate = Path.Combine(tempDir, "output.%(ext)s");
 
-            // ── yt-dlp downloads + merges on the server using ffmpeg ───────
-            // --merge-output-format mp4  → always produce a single mp4
-            // -N 4                       → 4 parallel fragment threads (faster)
             var ytArgs = isAudio
-                ? $"-f \"{format}\" {AntiBlockArgs} -o \"{outTemplate}\" --no-playlist \"{dto.Url}\""
-                : $"-f \"{format}\" --merge-output-format mp4 {AntiBlockArgs} -N 4 -o \"{outTemplate}\" --no-playlist \"{dto.Url}\"";
+                ? $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+                  $"-o \"{outTemplate}\" --no-playlist \"{dto.Url}\""
+                : $"-f \"{format}\" --merge-output-format mp4 {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+                  $"-N 4 -o \"{outTemplate}\" --no-playlist \"{dto.Url}\"";
 
             await RunYtDlp(ytArgs);
 
-            // Find the output file (extension may differ if fallback kicked in)
             var outputFile = Directory.GetFiles(tempDir).FirstOrDefault();
             if (outputFile == null)
                 return BadRequest(new { message = "Download failed: no output file produced." });
 
-            var actualExt  = Path.GetExtension(outputFile).TrimStart('.');
-            var fileName   = SanitizeFileName($"{dto.Quality}_{platform}.{actualExt}");
-            var mimeType   = actualExt == "mp3" ? "audio/mpeg"
-                           : actualExt == "m4a" ? "audio/mp4"
-                           : "video/mp4";
+            var actualExt = Path.GetExtension(outputFile).TrimStart('.');
+            var fileName  = SanitizeFileName($"{dto.Quality}_{platform}.{actualExt}");
+            var mimeType  = actualExt == "mp3" ? "audio/mpeg"
+                          : actualExt == "m4a" ? "audio/mp4"
+                          : "video/mp4";
 
             var bytes = await System.IO.File.ReadAllBytesAsync(outputFile);
-
-            // Cleanup temp dir after reading
             Directory.Delete(tempDir, true);
 
-            // Return the file directly — Flutter just saves it, no muxing needed
             return File(bytes, mimeType, fileName);
         }
-        catch (Exception ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Subtitles ───────────────────────────────────────────────
+    // ─── Subtitles ────────────────────────────────────────────────────────────
     [HttpPost("subtitles")]
     public async Task<IActionResult> GetSubtitles([FromBody] SubtitleRequestDto dto)
     {
         try
         {
             await TrackRequest();
-
             var lang    = dto.Language ?? "en";
             var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
             Directory.CreateDirectory(tempDir);
 
-            var args = $"--write-subs --sub-langs \"{lang}\" " +
-                       $"--skip-download --no-playlist " +
-                       $"-o \"{tempDir}/sub\" \"{dto.Url}\"";
-            await RunYtDlp(args);
+            await RunYtDlp($"--write-subs --sub-langs \"{lang}\" --skip-download --no-playlist " +
+                           $"-o \"{tempDir}/sub\" \"{dto.Url}\"");
 
             var subFile = Directory.GetFiles(tempDir).FirstOrDefault();
             if (subFile == null)
             {
-                args = $"--write-auto-subs --sub-langs \"{lang}\" " +
-                       $"--skip-download --no-playlist " +
-                       $"-o \"{tempDir}/sub\" \"{dto.Url}\"";
-                await RunYtDlp(args);
+                await RunYtDlp($"--write-auto-subs --sub-langs \"{lang}\" --skip-download --no-playlist " +
+                               $"-o \"{tempDir}/sub\" \"{dto.Url}\"");
                 subFile = Directory.GetFiles(tempDir).FirstOrDefault();
             }
 
-            if (subFile == null)
-                return NotFound(new { message = $"No subtitles found for language: {lang}" });
+            if (subFile == null) return NotFound(new { message = $"No subtitles: {lang}" });
 
             var content = await System.IO.File.ReadAllTextAsync(subFile);
             var subExt  = Path.GetExtension(subFile).TrimStart('.');
             Directory.Delete(tempDir, true);
 
-            return Ok(new
-            {
-                language  = lang,
-                format    = subExt,
-                content,
-                plainText = ExtractPlainText(content, subExt)
-            });
+            return Ok(new { language = lang, format = subExt, content,
+                            plainText = ExtractPlainText(content, subExt) });
         }
-        catch (Exception ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Playlist selective ──────────────────────────────────────
+    // ─── Playlist selective download ──────────────────────────────────────────
     [HttpPost("playlist/download")]
     public async Task<IActionResult> PlaylistDownload([FromBody] PlaylistDownloadDto dto)
     {
         try
         {
             await TrackRequest();
-
             var format = dto.Quality switch
             {
                 "1080" => "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]",
@@ -255,53 +236,59 @@ public class MediaController : ControllerBase
             {
                 try
                 {
-                    var r = await RunYtDlp($"-g -f \"{format}\" \"{url}\"");
+                    var platform = DetectPlatform(url);
+                    var r     = await RunYtDlp($"-g -f \"{format}\" {GetPlatformArgs(platform)} \"{url}\"");
                     var links = r.Trim().Split('\n');
-                    return new
-                    {
-                        url,
-                        success  = true,
-                        videoUrl = links.Length > 0 ? links[0].Trim() : null,
-                        audioUrl = links.Length > 1 ? links[1].Trim() : null,
-                        error    = (string?)null
-                    };
+                    return new { url, success = true,
+                                 videoUrl = links.Length > 0 ? links[0].Trim() : null,
+                                 audioUrl = links.Length > 1 ? links[1].Trim() : null,
+                                 error = (string?)null };
                 }
                 catch (Exception ex)
                 {
-                    return new
-                    {
-                        url,
-                        success  = false,
-                        videoUrl = (string?)null,
-                        audioUrl = (string?)null,
-                        error    = (string?)ex.Message
-                    };
+                    return new { url, success = false,
+                                 videoUrl = (string?)null, audioUrl = (string?)null,
+                                 error = (string?)ex.Message };
                 }
             });
 
-            var results = await Task.WhenAll(tasks);
-            return Ok(new { items = results });
+            return Ok(new { items = await Task.WhenAll(tasks) });
         }
-        catch (Exception ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Spotify helpers ─────────────────────────────────────────
+    // ─── Audio platform analyze ───────────────────────────────────────────────
+    private async Task<IActionResult> AnalyzeAudioPlatform(string url, string platform)
+    {
+        var result = await RunYtDlp($"-J --no-playlist {AntiBlockArgs} {GetPlatformArgs(platform)} \"{url}\"");
+        var json   = JsonDocument.Parse(result).RootElement;
+
+        return Ok(new
+        {
+            type      = "audio",
+            platform,
+            title     = json.TryGetProperty("title",     out var t)  ? t.GetString()  : "Unknown",
+            duration  = json.TryGetProperty("duration",  out var d)
+                        && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0,
+            thumbnail = json.TryGetProperty("thumbnail", out var tn) ? tn.GetString() : null,
+            uploader  = json.TryGetProperty("uploader",  out var u)  ? u.GetString()  : null,
+            subtitles = new { available = false, hasManual = false,
+                              hasAutoGenerated = false, languages = Array.Empty<string>() },
+            availableQualities = GetQualities(platform)
+        });
+    }
+
+    // ─── Spotify ──────────────────────────────────────────────────────────────
     private async Task<IActionResult> AnalyzeSpotify(string url)
     {
         await RunProcess("spotdl", $"--print-errors save \"{url}\"");
         return Ok(new
         {
-            type     = "audio",
-            platform = "spotify",
-            message  = "Spotify track detected",
-            url,
+            type = "audio", platform = "spotify", url,
             availableQualities = new[]
             {
-                new { label = "MP3 320kbps", value = "mp3", type = "audio" },
-                new { label = "M4A",         value = "m4a", type = "audio" }
+                new { label = "MP3 320kbps", value = "mp3", type = "audio", available = true },
+                new { label = "M4A",         value = "m4a", type = "audio", available = true }
             }
         });
     }
@@ -310,69 +297,103 @@ public class MediaController : ControllerBase
     {
         var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(tempDir);
-
         await RunProcess("spotdl", $"download \"{url}\" --output \"{tempDir}\"");
-
         var file = Directory.GetFiles(tempDir).FirstOrDefault();
-        if (file == null)
-            return BadRequest(new { message = "Spotify download failed" });
-
+        if (file == null) return BadRequest(new { message = "Spotify download failed" });
         var bytes    = await System.IO.File.ReadAllBytesAsync(file);
-        var base64   = Convert.ToBase64String(bytes);
         var fileName = Path.GetFileName(file);
         Directory.Delete(tempDir, true);
-
-        return Ok(new { platform = "spotify", fileName, base64, message = "Download successful" });
+        return File(bytes, "audio/mpeg", fileName);
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────
-    private static string ExtractPlainText(string content, string format)
+    // ─── Platform detection — covers 50+ platforms ───────────────────────────
+    private static string DetectPlatform(string url)
     {
-        var lines = content.Split('\n');
-        if (format == "vtt")
-            return string.Join(" ", lines
-                .Where(l => !l.StartsWith("WEBVTT") && !l.Contains("-->")
-                            && !string.IsNullOrWhiteSpace(l)
-                            && !l.Trim().All(char.IsDigit))
-                .Select(l => l.Trim()).Distinct());
+        var u = url.ToLowerInvariant();
+        return u switch
+        {
+            // ── Video platforms ──────────────────────────────────────────────
+            _ when u.Contains("youtube.com")    || u.Contains("youtu.be")      => "youtube",
+            _ when u.Contains("tiktok.com")     || u.Contains("vm.tiktok.com")
+                                                || u.Contains("vt.tiktok.com") => "tiktok",
+            _ when u.Contains("instagram.com")                                 => "instagram",
+            _ when u.Contains("facebook.com")   || u.Contains("fb.watch")
+                                                || u.Contains("fb.com")        => "facebook",
+            _ when u.Contains("twitter.com")    || u.Contains("x.com")
+                                                || u.Contains("t.co")          => "twitter",
+            _ when u.Contains("reddit.com")     || u.Contains("redd.it")       => "reddit",
+            _ when u.Contains("vimeo.com")                                     => "vimeo",
+            _ when u.Contains("dailymotion.com")|| u.Contains("dai.ly")        => "dailymotion",
+            _ when u.Contains("twitch.tv")                                     => "twitch",
+            _ when u.Contains("bilibili.com")   || u.Contains("b23.tv")        => "bilibili",
+            _ when u.Contains("rumble.com")                                    => "rumble",
+            _ when u.Contains("odysee.com")     || u.Contains("lbry.tv")       => "odysee",
+            _ when u.Contains("kick.com")                                      => "kick",
+            _ when u.Contains("pinterest.com")  || u.Contains("pin.it")        => "pinterest",
+            _ when u.Contains("linkedin.com")                                  => "linkedin",
+            _ when u.Contains("snapchat.com")                                  => "snapchat",
+            _ when u.Contains("telegram.me")    || u.Contains("t.me")          => "telegram",
+            _ when u.Contains("streamable.com")                                => "streamable",
+            _ when u.Contains("9gag.com")                                      => "9gag",
+            _ when u.Contains("likee.video")    || u.Contains("l.likee.video") => "likee",
+            _ when u.Contains("triller.co")                                    => "triller",
+            _ when u.Contains("kwai.com")       || u.Contains("kw.ai")         => "kwai",
+            _ when u.Contains("capcut.com")                                    => "capcut",
+            _ when u.Contains("funimation.com")                                => "funimation",
+            _ when u.Contains("crunchyroll.com")                               => "crunchyroll",
+            _ when u.Contains("ted.com")                                       => "ted",
+            _ when u.Contains("bbc.co.uk")      || u.Contains("bbc.com")       => "bbc",
+            _ when u.Contains("cnn.com")                                       => "cnn",
+            _ when u.Contains("nytimes.com")                                   => "nytimes",
+            _ when u.Contains("vk.com")                                        => "vk",
+            _ when u.Contains("ok.ru")                                         => "ok",
+            _ when u.Contains("coub.com")                                      => "coub",
+            _ when u.Contains("imdb.com")                                      => "imdb",
 
-        if (format == "srt")
-            return string.Join(" ", lines
-                .Where(l => !l.Contains("-->") && !string.IsNullOrWhiteSpace(l)
-                            && !l.Trim().All(char.IsDigit))
-                .Select(l => l.Trim()));
+            // ── Audio platforms ──────────────────────────────────────────────
+            _ when u.Contains("spotify.com")                                   => "spotify",
+            _ when u.Contains("soundcloud.com")                                => "soundcloud",
+            _ when u.Contains("bandcamp.com")                                  => "bandcamp",
+            _ when u.Contains("audiomack.com")                                 => "audiomack",
+            _ when u.Contains("mixcloud.com")                                  => "mixcloud",
+            _ when u.Contains("deezer.com")                                    => "deezer",
+            _ when u.Contains("music.apple.com")                               => "applemusic",
+            _ when u.Contains("music.amazon.com")                              => "amazonmusic",
+            _ when u.Contains("tidal.com")                                     => "tidal",
+            _ when u.Contains("podbean.com")                                   => "podbean",
+            _ when u.Contains("anchor.fm") || u.Contains("podcasters.spotify") => "podcast",
 
-        return content;
+            // ── Fallback: let yt-dlp try anything ───────────────────────────
+            _ when Uri.TryCreate(url, UriKind.Absolute, out _) => "generic",
+            _ => "unknown"
+        };
     }
 
-    private static string SanitizeFileName(string name) =>
-        string.Concat(name.Split(Path.GetInvalidFileNameChars()));
-
-    private static string DetectPlatform(string url) => url switch
+    // ─── Per-platform yt-dlp extra args ──────────────────────────────────────
+    private static string GetPlatformArgs(string platform) => platform switch
     {
-        var u when u.Contains("youtube.com") || u.Contains("youtu.be") => "youtube",
-        var u when u.Contains("facebook.com") || u.Contains("fb.watch") => "facebook",
-        var u when u.Contains("tiktok.com")   => "tiktok",
-        var u when u.Contains("instagram.com") => "instagram",
-        var u when u.Contains("soundcloud.com") => "soundcloud",
-        var u when u.Contains("spotify.com")   => "spotify",
-        _ => "unknown"
+        "tiktok"     => "--extractor-args \"tiktok:app_name=trill;app_version=26.1.3\" " +
+                        "--no-check-certificates",
+        "facebook"   => "--add-header \"Sec-Fetch-Site:same-origin\" " +
+                        "--add-header \"Referer:https://www.facebook.com/\"",
+        "instagram"  => "--add-header \"Referer:https://www.instagram.com/\"",
+        "twitter"    => "--add-header \"Referer:https://x.com/\"",
+        "reddit"     => "--add-header \"Referer:https://www.reddit.com/\"",
+        "bilibili"   => "--add-header \"Referer:https://www.bilibili.com/\"",
+        "vk"         => "--add-header \"Referer:https://vk.com/\"",
+        "pinterest"  => "--add-header \"Referer:https://www.pinterest.com/\"",
+        "twitch"     => "--no-check-certificates",
+        "generic"    => "--no-check-certificates",
+        _            => ""
     };
 
-    private static string BuildVideoUrl(string platform, string? id) =>
-        platform switch
-        {
-            "youtube" => $"https://www.youtube.com/watch?v={id}",
-            _ => id ?? ""
-        };
-
-    private static bool IsPlaylist(string url) =>
-        url.Contains("playlist?list=") ||
-        (url.Contains("list=") && !url.Contains("watch?v="));
-
+    // ─── Qualities ────────────────────────────────────────────────────────────
     private static List<object> GetQualities(string platform, List<int>? heights = null)
     {
-        if (platform is "soundcloud" or "spotify")
+        // Pure audio platforms
+        if (platform is "spotify" or "soundcloud" or "bandcamp" or "audiomack"
+                     or "mixcloud" or "deezer" or "applemusic" or "amazonmusic"
+                     or "tidal" or "podbean" or "podcast")
             return new List<object>
             {
                 new { label = "MP3", value = "mp3", type = "audio", available = true },
@@ -391,17 +412,52 @@ public class MediaController : ControllerBase
         };
 
         return all
-            .Where(q => q.type == "audio" || heights == null ||
+            .Where(q => q.type == "audio" || heights == null || heights.Count == 0 ||
                         heights.Any(h => h >= int.Parse(q.value)))
             .Select(q => (object)new
             {
                 label     = q.label,
                 value     = q.value,
                 type      = q.type,
-                available = heights == null || q.type == "audio" ||
+                available = heights == null || heights.Count == 0 || q.type == "audio" ||
                             heights.Any(h => h >= int.Parse(q.value))
             })
             .ToList();
+    }
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+    private static string ExtractPlainText(string content, string format)
+    {
+        var lines = content.Split('\n');
+        if (format == "vtt")
+            return string.Join(" ", lines
+                .Where(l => !l.StartsWith("WEBVTT") && !l.Contains("-->")
+                            && !string.IsNullOrWhiteSpace(l) && !l.Trim().All(char.IsDigit))
+                .Select(l => l.Trim()).Distinct());
+        if (format == "srt")
+            return string.Join(" ", lines
+                .Where(l => !l.Contains("-->") && !string.IsNullOrWhiteSpace(l)
+                            && !l.Trim().All(char.IsDigit))
+                .Select(l => l.Trim()));
+        return content;
+    }
+
+    private static string SanitizeFileName(string name) =>
+        string.Concat(name.Split(Path.GetInvalidFileNameChars()));
+
+    private static string BuildVideoUrl(string platform, string? id) =>
+        platform switch
+        {
+            "youtube" => $"https://www.youtube.com/watch?v={id}",
+            _         => id ?? ""
+        };
+
+    private static bool IsPlaylist(string url, string platform)
+    {
+        var u = url.ToLowerInvariant();
+        return platform == "youtube"
+            ? u.Contains("playlist?list=") || (u.Contains("list=") && !u.Contains("watch?v="))
+            : false; // other platforms: treat as single video
     }
 
     private async Task TrackRequest()
@@ -433,14 +489,12 @@ public class MediaController : ControllerBase
         var error  = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
 
-        if (process.ExitCode != 0)
-            throw new Exception(error);
-
+        if (process.ExitCode != 0) throw new Exception(error);
         return output;
     }
 }
 
-// ─── DTOs ─────────────────────────────────────────────────────────
+// ─── DTOs ─────────────────────────────────────────────────────────────────────
 public record MediaRequestDto(string Url);
 public record MediaDownloadDto(string Url, string Quality);
 public record PlaylistDownloadDto(List<string> Urls, string Quality);

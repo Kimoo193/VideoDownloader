@@ -13,12 +13,24 @@ public class MediaController : ControllerBase
 {
     private readonly AppDbContext _db;
 
+    // Full anti-block args — do NOT use for platforms that use --impersonate
+    // because --user-agent here overrides the impersonation user-agent and breaks it
     private const string AntiBlockArgs =
         "--user-agent \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" " +
         "--add-header \"Accept-Language:en-US,en;q=0.9\" " +
         "--add-header \"Sec-Fetch-Mode:navigate\" " +
         "--retries 3 --sleep-interval 1";
+
+    // Minimal args for impersonate platforms (TikTok, Instagram)
+    // --user-agent must NOT be set — --impersonate handles headers automatically
+    private const string ImpersonateBaseArgs =
+        "--add-header \"Accept-Language:en-US,en;q=0.9\" " +
+        "--retries 3 --sleep-interval 1";
+
+    // Pick the correct base args depending on platform
+    private static string GetBaseArgs(string platform) =>
+        platform is "tiktok" or "instagram" ? ImpersonateBaseArgs : AntiBlockArgs;
 
     public MediaController(AppDbContext db) { _db = db; }
 
@@ -33,7 +45,7 @@ public class MediaController : ControllerBase
             var platform = DetectPlatform(url);
 
             if (platform == "spotify")  return await AnalyzeSpotify(url);
-            if (platform == "unknown")  return BadRequest(new { message = "Unsupported URL" });
+            if (platform is "unknown" or "generic")  return BadRequest(new { message = "Unsupported URL" });
 
             if (platform is "soundcloud" or "bandcamp" or "audiomack" or "mixcloud" or "deezer")
                 return await AnalyzeAudioPlatform(url, platform);
@@ -43,7 +55,7 @@ public class MediaController : ControllerBase
             if (isPlaylist)
             {
                 var result  = await RunYtDlp(
-                    $"--flat-playlist -J {AntiBlockArgs} {GetPlatformArgs(platform)} \"{url}\"");
+                    $"--flat-playlist -J {GetBaseArgs(platform)} {GetPlatformArgs(platform)} \"{url}\"");
                 var json    = JsonDocument.Parse(result).RootElement;
                 var entries = json.GetProperty("entries").EnumerateArray().ToList();
 
@@ -70,7 +82,7 @@ public class MediaController : ControllerBase
             else
             {
                 var result = await RunYtDlp(
-                    $"-J --no-playlist {AntiBlockArgs} {GetPlatformArgs(platform)} \"{url}\"");
+                    $"-J --no-playlist {GetBaseArgs(platform)} {GetPlatformArgs(platform)} \"{url}\"");
                 var json   = JsonDocument.Parse(result).RootElement;
 
                 var formats = json.TryGetProperty("formats", out var fmtArr)
@@ -133,7 +145,7 @@ public class MediaController : ControllerBase
             var url = ExtractUrl(dto.Url);
             var platform = DetectPlatform(url);
             if (platform == "spotify") return await DownloadSpotify(url);
-            if (platform == "unknown") return BadRequest(new { message = "Unsupported URL" });
+            if (platform is "unknown" or "generic") return BadRequest(new { message = "Unsupported URL" });
             return await DownloadSingleVideo(url, dto.Quality, platform);
         }
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
@@ -147,7 +159,7 @@ public class MediaController : ControllerBase
             await TrackRequest();
             var url = ExtractUrl(dto.Url);
             var platform = DetectPlatform(url);
-            if (platform == "unknown") return BadRequest(new { message = "Unsupported URL" });
+            if (platform is "unknown" or "generic") return BadRequest(new { message = "Unsupported URL" });
             return await DownloadSingleVideo(url, dto.Quality, platform);
         }
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
@@ -243,17 +255,17 @@ public class MediaController : ControllerBase
         string ytArgs;
         if (isAudio)
         {
-            ytArgs = $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+            ytArgs = $"-f \"{format}\" {GetBaseArgs(platform)} {GetPlatformArgs(platform)} " +
                      $"-o \"{outTemplate}\" --no-playlist \"{url}\"";
         }
         else if (isMuxedPlatform)
         {
-            ytArgs = $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+            ytArgs = $"-f \"{format}\" {GetBaseArgs(platform)} {GetPlatformArgs(platform)} " +
                      $"-o \"{outTemplate}\" --no-playlist \"{url}\"";
         }
         else
         {
-            ytArgs = $"-f \"{format}\" --merge-output-format mp4 {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+            ytArgs = $"-f \"{format}\" --merge-output-format mp4 {GetBaseArgs(platform)} {GetPlatformArgs(platform)} " +
                      $"-N 4 -o \"{outTemplate}\" --no-playlist \"{url}\"";
         }
 
@@ -277,7 +289,7 @@ public class MediaController : ControllerBase
     // ─── Audio platform analyze ───────────────────────────────────────────────
     private async Task<IActionResult> AnalyzeAudioPlatform(string url, string platform)
     {
-        var result = await RunYtDlp($"-J --no-playlist {AntiBlockArgs} {GetPlatformArgs(platform)} \"{url}\"");
+        var result = await RunYtDlp($"-J --no-playlist {GetBaseArgs(platform)} {GetPlatformArgs(platform)} \"{url}\"");
         var json   = JsonDocument.Parse(result).RootElement;
 
         return Ok(new

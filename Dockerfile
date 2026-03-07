@@ -15,19 +15,24 @@ RUN dotnet publish -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
-
-# تثبيت الأدوات المطلوبة
+# تثبيت المكتبات المطلوبة لـ impersonate
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     python3 \
     python3-pip \
     curl \
+    libcurl4-openssl-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# تثبيت yt-dlp
+# تثبيت yt-dlp بأحدث إصدار
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp
 
+# تثبيت مكتبات Python الإضافية لـ impersonate
+RUN pip3 install --upgrade pip && \
+    pip3 install brotli certifi && \
+    pip3 install spotdl --break-system-packages --no-cache-dir
 # تثبيت spotdl
 RUN pip3 install spotdl --break-system-packages --no-cache-dir
 

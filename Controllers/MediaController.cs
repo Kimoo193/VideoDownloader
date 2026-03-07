@@ -123,7 +123,7 @@ public class MediaController : ControllerBase
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Download (single video — server muxes + streams file) ───────────────
+    // ─── Download ─────────────────────────────────────────────────────────────
     [HttpPost("download")]
     public async Task<IActionResult> Download([FromBody] MediaDownloadDto dto)
     {
@@ -140,10 +140,7 @@ public class MediaController : ControllerBase
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Playlist item download (Flutter calls this once per video) ──────────
-    // Keeping the same endpoint path for backward compatibility.
-    // Flutter's playlist_screen.dart already calls /api/media/download per item,
-    // so this endpoint now simply accepts one URL at a time and streams the file.
+    // ─── Playlist item download ───────────────────────────────────────────────
     [HttpPost("playlist/download")]
     public async Task<IActionResult> PlaylistDownload([FromBody] MediaDownloadDto dto)
     {
@@ -191,7 +188,7 @@ public class MediaController : ControllerBase
         catch (Exception ex) { return BadRequest(new { message = ex.Message }); }
     }
 
-    // ─── Core download logic (shared by /download and /playlist/download) ────
+    // ─── Core download logic ──────────────────────────────────────────────────
     private async Task<IActionResult> DownloadSingleVideo(string url, string quality, string platform)
     {
         var result = await DownloadSingleVideoAsBytes(url, quality, platform);
@@ -203,27 +200,70 @@ public class MediaController : ControllerBase
     {
         var isAudio = quality is "mp3" or "m4a";
 
-        var format = quality switch
+        // ── Platform-aware format selection ───────────────────────────────────
+        // TikTok, Instagram, Facebook, Twitter, Reddit — these platforms serve
+        // pre-muxed files (video+audio already combined).  Using bestvideo+bestaudio
+        // with --merge-output-format causes ffmpeg to fail because there is often
+        // only ONE combined stream, not separate video/audio tracks.
+        // For these we simply grab the best pre-muxed mp4 instead.
+        var isMuxedPlatform = platform is "tiktok" or "instagram" or "facebook"
+                                       or "twitter" or "reddit" or "pinterest"
+                                       or "snapchat" or "9gag" or "likee"
+                                       or "triller" or "kwai" or "capcut";
+
+        string format;
+        if (isAudio)
         {
-            "2160" => "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
-            "1080" => "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-            "720"  => "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]",
-            "480"  => "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]",
-            "360"  => "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]",
-            "mp3"  => "bestaudio[ext=mp3]/bestaudio",
-            "m4a"  => "bestaudio[ext=m4a]/bestaudio",
-            _      => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
-        };
+            format = quality == "mp3" ? "bestaudio[ext=mp3]/bestaudio" : "bestaudio[ext=m4a]/bestaudio";
+        }
+        else if (isMuxedPlatform)
+        {
+            // These platforms serve single combined streams — pick best available mp4
+            format = quality switch
+            {
+                "2160" => "best[height<=2160][ext=mp4]/best[height<=2160]/best",
+                "1080" => "best[height<=1080][ext=mp4]/best[height<=1080]/best",
+                "720"  => "best[height<=720][ext=mp4]/best[height<=720]/best",
+                "480"  => "best[height<=480][ext=mp4]/best[height<=480]/best",
+                "360"  => "best[height<=360][ext=mp4]/best[height<=360]/best",
+                _      => "best[ext=mp4]/best",
+            };
+        }
+        else
+        {
+            // YouTube, Vimeo, Dailymotion etc — separate video+audio tracks, need merge
+            format = quality switch
+            {
+                "2160" => "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+                "1080" => "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+                "720"  => "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]",
+                "480"  => "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]",
+                "360"  => "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]",
+                _      => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
+            };
+        }
 
         var tempDir     = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(tempDir);
         var outTemplate = Path.Combine(tempDir, "output.%(ext)s");
 
-        var ytArgs = isAudio
-            ? $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
-              $"-o \"{outTemplate}\" --no-playlist \"{url}\""
-            : $"-f \"{format}\" --merge-output-format mp4 {AntiBlockArgs} {GetPlatformArgs(platform)} " +
-              $"-N 4 -o \"{outTemplate}\" --no-playlist \"{url}\"";
+        string ytArgs;
+        if (isAudio)
+        {
+            ytArgs = $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+                     $"-o \"{outTemplate}\" --no-playlist \"{url}\"";
+        }
+        else if (isMuxedPlatform)
+        {
+            // No --merge-output-format for pre-muxed platforms — just download as-is
+            ytArgs = $"-f \"{format}\" {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+                     $"-o \"{outTemplate}\" --no-playlist \"{url}\"";
+        }
+        else
+        {
+            ytArgs = $"-f \"{format}\" --merge-output-format mp4 {AntiBlockArgs} {GetPlatformArgs(platform)} " +
+                     $"-N 4 -o \"{outTemplate}\" --no-playlist \"{url}\"";
+        }
 
         await RunYtDlp(ytArgs);
 
@@ -294,100 +334,54 @@ public class MediaController : ControllerBase
     // ─── Platform detection ───────────────────────────────────────────────────
     private static string DetectPlatform(string url)
     {
-        // Extract host safely to avoid substring false-positives
-        // e.g. "t.co" matching "contact.com", "fb.com" matching "cfb.com"
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return "unknown";
 
         var host = uri.Host.ToLowerInvariant();
-        // Strip leading "www." or "m." for cleaner matching
         if (host.StartsWith("www.")) host = host[4..];
         if (host.StartsWith("m."))   host = host[2..];
 
         return host switch
         {
-            // ── Video ────────────────────────────────────────────────────────
-            "youtube.com" or "youtu.be"
-                or "music.youtube.com"                              => "youtube",
-
-            "tiktok.com" or "vm.tiktok.com" or "vt.tiktok.com"    => "tiktok",
-
-            "instagram.com"                                         => "instagram",
-
-            "facebook.com" or "fb.watch" or "fb.com"
-                or "web.facebook.com"                               => "facebook",
-
-            "twitter.com" or "x.com" or "t.co"                     => "twitter",
-
-            "reddit.com" or "redd.it" or "old.reddit.com"          => "reddit",
-
-            "vimeo.com"                                             => "vimeo",
-
-            "dailymotion.com" or "dai.ly"                          => "dailymotion",
-
-            "twitch.tv" or "clips.twitch.tv"                       => "twitch",
-
-            "bilibili.com" or "b23.tv"                             => "bilibili",
-
-            "rumble.com"                                            => "rumble",
-
-            "odysee.com" or "lbry.tv"                              => "odysee",
-
-            "kick.com"                                              => "kick",
-
+            "youtube.com" or "youtu.be" or "music.youtube.com"                 => "youtube",
+            "tiktok.com" or "vm.tiktok.com" or "vt.tiktok.com"                => "tiktok",
+            "instagram.com"                                                     => "instagram",
+            "facebook.com" or "fb.watch" or "fb.com" or "web.facebook.com"    => "facebook",
+            "twitter.com" or "x.com" or "t.co"                                 => "twitter",
+            "reddit.com" or "redd.it" or "old.reddit.com"                      => "reddit",
+            "vimeo.com"                                                         => "vimeo",
+            "dailymotion.com" or "dai.ly"                                      => "dailymotion",
+            "twitch.tv" or "clips.twitch.tv"                                   => "twitch",
+            "bilibili.com" or "b23.tv"                                         => "bilibili",
+            "rumble.com"                                                        => "rumble",
+            "odysee.com" or "lbry.tv"                                          => "odysee",
+            "kick.com"                                                          => "kick",
             "pinterest.com" or "pin.it" or "pinterest.co.uk"
-                or "pinterest.fr" or "pinterest.de"                 => "pinterest",
-
-            "linkedin.com"                                          => "linkedin",
-
-            "snapchat.com" or "snap.com"                           => "snapchat",
-
-            "telegram.org" or "telegram.me" or "t.me"              => "telegram",
-
-            "streamable.com"                                        => "streamable",
-
-            "9gag.com"                                              => "9gag",
-
-            "likee.video" or "l.likee.video"                       => "likee",
-
-            "triller.co"                                            => "triller",
-
-            "kwai.com" or "kw.ai"                                   => "kwai",
-
-            "capcut.com"                                            => "capcut",
-
-            "ted.com"                                               => "ted",
-
-            "bbc.co.uk" or "bbc.com"                               => "bbc",
-
-            "cnn.com"                                               => "cnn",
-
-            "vk.com" or "vk.ru"                                    => "vk",
-
-            "ok.ru"                                                 => "ok",
-
-            "coub.com"                                              => "coub",
-
-            // ── Audio ────────────────────────────────────────────────────────
-            "open.spotify.com" or "spotify.com"                    => "spotify",
-
-            "soundcloud.com" or "on.soundcloud.com"                => "soundcloud",
-
-            _ when host.EndsWith(".bandcamp.com") || host == "bandcamp.com"
-                                                                    => "bandcamp",
-
-            "audiomack.com"                                         => "audiomack",
-
-            "mixcloud.com"                                          => "mixcloud",
-
-            "deezer.com" or "deezer.page.link"                     => "deezer",
-
-            "music.apple.com"                                       => "applemusic",
-
-            "tidal.com" or "listen.tidal.com"                      => "tidal",
-
-            // ── Fallback: let yt-dlp try ─────────────────────────────────────
-            _ => "generic"
+                or "pinterest.fr" or "pinterest.de"                            => "pinterest",
+            "linkedin.com"                                                      => "linkedin",
+            "snapchat.com" or "snap.com"                                       => "snapchat",
+            "telegram.org" or "telegram.me" or "t.me"                         => "telegram",
+            "streamable.com"                                                    => "streamable",
+            "9gag.com"                                                          => "9gag",
+            "likee.video" or "l.likee.video"                                   => "likee",
+            "triller.co"                                                        => "triller",
+            "kwai.com" or "kw.ai"                                               => "kwai",
+            "capcut.com"                                                        => "capcut",
+            "ted.com"                                                           => "ted",
+            "bbc.co.uk" or "bbc.com"                                           => "bbc",
+            "cnn.com"                                                           => "cnn",
+            "vk.com" or "vk.ru"                                                => "vk",
+            "ok.ru"                                                             => "ok",
+            "coub.com"                                                          => "coub",
+            "open.spotify.com" or "spotify.com"                                => "spotify",
+            "soundcloud.com" or "on.soundcloud.com"                            => "soundcloud",
+            _ when host.EndsWith(".bandcamp.com") || host == "bandcamp.com"    => "bandcamp",
+            "audiomack.com"                                                     => "audiomack",
+            "mixcloud.com"                                                      => "mixcloud",
+            "deezer.com" or "deezer.page.link"                                 => "deezer",
+            "music.apple.com"                                                   => "applemusic",
+            "tidal.com" or "listen.tidal.com"                                  => "tidal",
+            _                                                                   => "generic"
         };
     }
 
@@ -413,14 +407,9 @@ public class MediaController : ControllerBase
         var u = url.ToLowerInvariant();
         return platform switch
         {
-            // YouTube: explicit playlist URL, not a single video with list param
             "youtube" => u.Contains("playlist?list=") ||
                          (u.Contains("list=") && !u.Contains("/watch") && !u.Contains("youtu.be")),
-
-            // TikTok: user profile page (/@username) without a specific video path
             "tiktok"  => u.Contains("/@") && !u.Contains("/video/"),
-
-            // Other platforms: treat as single video (Instagram has no public playlist API)
             _         => false,
         };
     }
